@@ -16,14 +16,26 @@
 package org.modeshape.jcr;
 
 import static org.hamcrest.core.Is.is;
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
 
+import java.io.File;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.io.InputStream;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+
+import javax.jcr.Binary;
 import javax.jcr.Node;
 import javax.jcr.PathNotFoundException;
 import javax.jcr.RepositoryException;
 import javax.jcr.Session;
+import javax.jcr.ValueFactory;
 import javax.jcr.security.AccessControlList;
 import javax.jcr.security.AccessControlManager;
 import javax.jcr.security.Privilege;
@@ -321,6 +333,124 @@ public class JcrToolsTest extends SingleUseAbstractTest {
         Node childNode = tools.findOrCreateChild(session.getRootNode(), "/Person/Address/County", DEF_TYPE);
         assertNotNull(childNode);
         assertThat(childNode.getName(), is("County"));
+    }
+
+    @Test
+    public void testConcurrentSamsNameSiblingFileUpload()
+            throws RepositoryException, IOException, InterruptedException, ExecutionException {
+        Node node = tools.findOrCreateNode(session, "File", DEF_TYPE, "nt:folder");
+        assertNotNull(node);
+        assertThat(node.getName(), is("File"));
+
+        session.save();
+
+        Node dsNode = tools.findOrCreateNode(node, "ds", DEF_TYPE, "nt:file");
+        assertNotNull(dsNode);
+        assertThat(dsNode.getName(), is("ds"));
+
+        String filePath = dsNode.getPath();
+        File testFile = File.createTempFile("Content", ".txt");
+        testFile.deleteOnExit();
+        try (final FileWriter fw = new FileWriter(testFile)) {
+            for (int i = 0; i < 1000000; i++) {
+                fw.write("fooooooooooooooooooooooooooooooooooooooooooooooooooo");
+            }
+        } catch (final IOException e) {
+            throw new RuntimeException(e);
+        }
+
+        assertTrue(dsNode.isNew());
+        final ExecutorService executor = Executors.newFixedThreadPool(2);
+        Future<Node> firstTask = executor.submit(() -> {
+            Node fileNode = tools.uploadFile(session, dsNode.getPath(), testFile);
+            session.save();
+            return fileNode;
+        });
+
+        Future<Node> proceedingTask = executor.submit(() -> {
+            Thread.sleep(100);
+            Node fileNode = tools.uploadFile(session, dsNode.getPath(), testFile);
+            session.save();
+            return fileNode;
+        });
+
+        assertEquals(filePath, tools.getNode(node, firstTask.get().getName(), true).getPath());
+        assertEquals(filePath, tools.getNode(node, proceedingTask.get().getName(), true).getPath());
+
+        executor.shutdown();
+
+        assertEquals(filePath, tools.getNode(node, "ds", true).getPath());
+    }
+
+    @Test
+    public void testConcurrentSamsNameSiblingBinaryContent()
+            throws RepositoryException, IOException, InterruptedException, ExecutionException {
+        Node node = tools.findOrCreateNode(session, "File", DEF_TYPE, "nt:folder");
+        assertNotNull(node);
+        assertThat(node.getName(), is("File"));
+
+        session.save();
+
+        File testFile = File.createTempFile("Content", ".txt");
+        testFile.deleteOnExit();
+        try (final FileWriter fw = new FileWriter(testFile)) {
+            for (int i = 0; i < 1000000; i++) {
+                fw.write("fooooooooooooooooooooooooooooooooooooooooooooooooooo");
+            }
+        } catch (final IOException e) {
+            throw new RuntimeException(e);
+        }
+
+        final ExecutorService executor = Executors.newFixedThreadPool(2);
+        Future<Node> firstTask = executor.submit(() -> {
+            Node dsNode = tools.findOrCreateNode(node, "ds", DEF_TYPE, "nt:file");
+            assertNotNull(dsNode);
+            assertThat(dsNode.getName(), is("ds"));
+
+            String filePath = dsNode.getPath();
+
+            assertTrue(dsNode.isNew());
+            Node contentNode = tools.findOrCreateChild(dsNode, "jcr:content", "nt:resource");
+            ValueFactory modevf =
+                    (ValueFactory) node.getSession().getValueFactory();
+            InputStream in = new java.io.FileInputStream(testFile);
+
+            Binary binary = modevf.createBinary(in);
+            contentNode.setProperty("jcr:data", binary);
+
+            session.save();
+            assertEquals(filePath + "/jcr:content", contentNode.getPath());
+            return contentNode;
+        });
+
+        Thread.sleep(100);
+        Future<Node> proceedingTask = executor.submit(() -> {
+            Node dsNode = tools.findOrCreateNode(node, "ds", DEF_TYPE, "nt:file");
+            assertNotNull(dsNode);
+            assertThat(dsNode.getName(), is("ds"));
+
+            String filePath = dsNode.getPath();
+
+            assertTrue(dsNode.isNew());
+            Node contentNode = tools.findOrCreateChild(dsNode, "jcr:content", "nt:resource");
+            ValueFactory modevf =
+                    (ValueFactory) node.getSession().getValueFactory();
+            InputStream in = new java.io.FileInputStream(testFile);
+
+            Binary binary = modevf.createBinary(in);
+            contentNode.setProperty("jcr:data", binary);
+
+            session.save();
+            assertEquals(filePath + "/jcr:content", contentNode.getPath());
+            return contentNode;
+        });
+
+        firstTask.get();
+        proceedingTask.get();
+
+        assertEquals("/File/ds", tools.findOrCreateNode(session, "/File/ds").getPath());
+
+        executor.shutdown();
     }
 
     private void setPolicy( String path,
