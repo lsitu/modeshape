@@ -64,6 +64,7 @@ public abstract class SingleUseAbstractTest extends AbstractJcrRepositoryTest {
 
     protected JcrRepository repository;
     protected JcrSession session;
+    protected JcrSession session1;
     protected JcrTools tools;
     
     protected void startRepository() throws Exception {
@@ -72,12 +73,14 @@ public abstract class SingleUseAbstractTest extends AbstractJcrRepositoryTest {
         repository = new JcrRepository(repositoryConfiguration);
         repository.start();
         session = repository.login();
+        session1 = repository.login();
     }
 
     protected void stopRepository() throws Exception {
         try {
             try {
                 if (session != null && session.isLive()) session.logout();
+                if (session1 != null && session1.isLive()) session1.logout();
             } finally {
                 TestingUtil.killRepositories(repository);
             }

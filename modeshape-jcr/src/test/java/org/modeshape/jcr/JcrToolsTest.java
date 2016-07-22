@@ -20,6 +20,15 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
 
+import java.io.File;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.io.InputStream;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+
 import javax.jcr.Node;
 import javax.jcr.PathNotFoundException;
 import javax.jcr.RepositoryException;
@@ -32,6 +41,8 @@ import org.junit.Before;
 import org.junit.Test;
 import org.modeshape.common.collection.Problems;
 import org.modeshape.common.collection.SimpleProblems;
+import org.modeshape.jcr.api.Binary;
+import org.modeshape.jcr.api.ValueFactory;
 import org.modeshape.jcr.api.JcrTools;
 import org.modeshape.jcr.security.SimplePrincipal;
 
@@ -321,6 +332,78 @@ public class JcrToolsTest extends SingleUseAbstractTest {
         Node childNode = tools.findOrCreateChild(session.getRootNode(), "/Person/Address/County", DEF_TYPE);
         assertNotNull(childNode);
         assertThat(childNode.getName(), is("County"));
+    }
+
+    @Test
+    public void testConcurrentSameNameSiblingBinaryContent()
+            throws RepositoryException, IOException, InterruptedException, ExecutionException {
+
+        File testFile = File.createTempFile("Content", ".txt");
+        testFile.deleteOnExit();
+        try (final FileWriter fw = new FileWriter(testFile)) {
+            for (int i = 0; i < 10000000; i++) {
+                fw.write("fooooooo");
+            }
+        } catch (final IOException e) {
+            throw new RuntimeException(e);
+        }
+
+        tools.findOrCreateNode(session, "object", DEF_TYPE, "nt:folder");
+        session.save();
+
+        // create two concurrent threads for test
+        final ExecutorService executor = Executors.newFixedThreadPool(2);
+
+        // first thread to upload file
+        Future<Node> firstTask = createIngestTask(executor, testFile, session);
+
+        // second thread to upload file in another session 
+        Future<Node> secondTask = createIngestTask(executor, testFile, session1);
+
+        // first thread uploading file
+        Node node = firstTask.get();
+        assertTrue("First thread SNS nt:file node created before first thread calling JcrSession.save()",
+                node.getPath().indexOf("ds[2]") < 0);
+        session.save();
+        assertTrue("First thread SNS nt:file node created after first thread calling JcrSession.save()!",
+                node.getPath().indexOf("ds[2]") < 0);
+
+        // second thread uploading file
+        node = secondTask.get();
+        assertTrue("Second thread SNS nt:file node created after first thread calling JcrSession.save()!",
+                node.getPath().indexOf("ds[2]") < 0);
+        session1.save();
+        assertTrue("Second thread SNS nt:file node created after second thread calling JcrSession.save()!",
+                node.getPath().indexOf("ds[2]") < 0);
+
+        executor.shutdown();
+    }
+
+    /**
+     * upload datastreams
+     */
+    private Future<Node> createIngestTask(final ExecutorService executor, File testFile, JcrSession sess) {
+
+        return executor.submit(() -> {
+
+            final Node objNode = tools.findOrCreateNode(sess, "object", "nt:folder");
+
+            final Node dsNode = tools.findOrCreateNode(objNode, "ds", DEF_TYPE, "nt:file");
+
+            final Node contentNode = dsNode.addNode("jcr:content", "nt:resource");
+
+            ValueFactory modevf =
+                    (ValueFactory) sess.getValueFactory();
+
+            try (final InputStream in = new java.io.FileInputStream(testFile)) {
+                Binary binary = modevf.createBinary(in, null);
+                contentNode.setProperty("jcr:data", binary);
+            } catch (final IOException e) {
+                throw new RuntimeException(e);
+            }
+
+            return contentNode;
+        });
     }
 
     private void setPolicy( String path,
